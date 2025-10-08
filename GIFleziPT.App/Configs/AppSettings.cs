@@ -7,4 +7,5 @@ public class AppSettings
 
     public string PythonScriptPath { get; set; } = string.Empty;
     public AzureDevOpsSettings AzureDevOps { get; set; } = new AzureDevOpsSettings();
+    public int TaskRunnerJobIntervalSeconds { get; set; } = 300; // Default to 5 minutes
 }

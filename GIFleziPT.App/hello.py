@@ -3,9 +3,9 @@
 hello.py - simple executable script
 
 Usage:
-    ./hello.py <TaskName>
+    ./hello.py <TaskTitle>
 
-This script prints "Task <TaskName> completed" to stdout.
+This script prints "Task <TaskTitle> completed" to stdout.
 """
 
 import sys
@@ -13,11 +13,11 @@ import sys
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: ./hello.py <TaskName>")
+        print("Usage: ./hello.py <TaskTitle>")
         sys.exit(1)
 
-    task_name = sys.argv[1]
-    print(f"Task {task_name} completed")
+    task_title = sys.argv[1]
+    print(f"Task {task_title} completed")
 
 
 if __name__ == "__main__":

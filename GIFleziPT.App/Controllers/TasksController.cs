@@ -14,7 +14,7 @@ public class TasksController(
     [HttpPost("process-task")]
     public async Task<IActionResult> ProcessTaskAsync([FromBody] ProcessTaskRequest request)
     {
-        logger.LogInformation("Received request to process task.");
+        logger.LogInformation("Received request ProcessTaskAsync");
 
         try
         {
@@ -23,15 +23,15 @@ public class TasksController(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "ProcessTaskAsync error. TaskName: {TaskName}. Message: {Message}", request.TaskName, ex.Message);
+            logger.LogError(ex, "ProcessTaskAsync error. TaskId: {TaskId}, TaskTitle: {TaskTitle}. Message: {Message}", request.TaskTitle, request.TaskTitle, ex.Message);
             return StatusCode(500, "Internal server error");
         }
     }
 
     [HttpGet("get-tasks")]
-    public async Task<IActionResult> GetAzureDevOpsTasks()
+    public async Task<IActionResult> GetAzureDevOpsTasksAsync()
     {
-        logger.LogInformation("Received request to get Azure DevOps tasks.");
+        logger.LogInformation("Received request GetAzureDevOpsTasksAsync");
 
         try
         {
@@ -40,7 +40,24 @@ public class TasksController(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "GetTasksFromAzureDevOps error. Message: {Message}", ex.Message);
+            logger.LogError(ex, "GetAzureDevOpsTasksAsync error. Message: {Message}", ex.Message);
+            return StatusCode(500, "Internal server error");
+        }
+    }
+
+    [HttpGet("run")]
+    public async Task<IActionResult> RunAsync()
+    {
+        logger.LogInformation("Received request RunAsync");
+
+        try
+        {
+            await taskService.RunAsync();
+            return Ok();
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "RunAsync error. Message: {Message}", ex.Message);
             return StatusCode(500, "Internal server error");
         }
     }

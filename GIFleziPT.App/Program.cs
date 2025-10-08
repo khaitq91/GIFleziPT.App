@@ -21,11 +21,12 @@ builder.Services.AddLogging(loggingBuilder =>
 });
 
 builder.Services.AddControllers();
+builder.Services.AddScoped<ITaskService, TaskService>();
+builder.Services.AddHostedService<TaskRunnerJob>();
+
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
-
-builder.Services.AddScoped<ITaskService, TaskService>();
 
 var app = builder.Build();
 
