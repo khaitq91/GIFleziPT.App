@@ -77,12 +77,16 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
     {
         var getTasksResult = await GetAzureDevOpsTasksAsync();
 
-        logger.LogInformation("RunAsync: Retrieved {TaskCount} tasks from Azure DevOps", getTasksResult.Tasks.Count);
-        var tasks = getTasksResult.Tasks.Where(m => m.State == "New" || m.State == "Active").OrderBy(m => m.Title.Split('-', 2).FirstOrDefault()).ToList();
+        logger.LogInformation("RunAsync: Retrieved {TaskCount} tasks from Azure DevOps - User: {UserDisplayName}", getTasksResult.Tasks.Count, AppSettings.Instance.AzureDevOps.PatUserDisplayName);
+        var tasks = getTasksResult.Tasks
+            .Where(m => m.State == "New" || m.State == "Active")
+            .OrderBy(m => m.ParentId.ToString() ?? m.Title.Split('-', 2).FirstOrDefault())
+            .ThenBy(m => m.Title.Split('-', 2).FirstOrDefault())
+            .ToList();
         logger.LogInformation("RunAsync: {NewTaskCount} new tasks to process", tasks.Count);
         foreach (var task in tasks)
         {
-            logger.LogInformation("ProcessTaskAsync: {Id} - {Title} - {State}", task.Id, task.Title, task.State);
+            logger.LogInformation("ProcessTaskAsync: {Id} - {Title} - {State} - ParentId: {ParentId} - ParentTitle: {ParentTitle}", task.Id, task.Title, task.State, task.ParentId, task.ParentTitle);
             try
             {
                 var processRequest = new ProcessTaskRequest
@@ -104,7 +108,7 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "Error processing task {Id} - {Title}", task.Id, task.Title);
+                logger.LogError(ex, "Error processing task {Id} - {Title} - {State} - ParentId: {ParentId} - ParentTitle: {ParentTitle}", task.Id, task.Title, task.State, task.ParentId, task.ParentTitle);
             }
         }
     }
@@ -119,7 +123,7 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
         var url = $"https://dev.azure.com/{organization}/{project}/_apis/wit/wiql?api-version=7.0";
         var wiql = new
         {
-            query = "SELECT [System.Id], [System.Title], [System.State] FROM WorkItems WHERE [System.WorkItemType] = 'Task' ORDER BY [System.Id] DESC"
+            query = "SELECT [System.Id], [System.Title], [System.State], [System.Parent], [System.AssignedTo] FROM WorkItems WHERE [System.WorkItemType] = 'Task' ORDER BY [System.Id] DESC"
         };
 
         var result = new GetAzureDevOpsTasksResult();
@@ -133,6 +137,8 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
         var wiqlResult = System.Text.Json.JsonDocument.Parse(await wiqlResponse.Content.ReadAsStringAsync());
         var workItemRefs = wiqlResult.RootElement.GetProperty("workItems");
 
+        var parentIdSet = new HashSet<int>();
+        var tempTasks = new List<AzureDevOpsTask>();
         foreach (var itemRef in workItemRefs.EnumerateArray())
         {
             int id = itemRef.GetProperty("id").GetInt32();
@@ -142,12 +148,80 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
             {
                 var workItemJson = System.Text.Json.JsonDocument.Parse(await workItemResponse.Content.ReadAsStringAsync());
                 var fields = workItemJson.RootElement.GetProperty("fields");
-                result.Tasks.Add(new AzureDevOpsTask
+                int? parentId = null;
+                string? parentTitle = null;
+                string? assignedTo = null;
+                if (fields.TryGetProperty("System.Parent", out var parentProp))
+                {
+                    if (parentProp.ValueKind == System.Text.Json.JsonValueKind.Number)
+                    {
+                        parentId = parentProp.GetInt32();
+                        parentIdSet.Add(parentId.Value);
+                    }
+                }
+                if (fields.TryGetProperty("System.AssignedTo", out var assignedProp))
+                {
+                    if (assignedProp.ValueKind == System.Text.Json.JsonValueKind.Object)
+                    {
+                        if (assignedProp.TryGetProperty("displayName", out var displayNameProp))
+                        {
+                            assignedTo = displayNameProp.GetString();
+                        }
+                    }
+                    else if (assignedProp.ValueKind == System.Text.Json.JsonValueKind.String)
+                    {
+                        assignedTo = assignedProp.GetString();
+                    }
+                }
+                tempTasks.Add(new AzureDevOpsTask
                 {
                     Id = id,
                     Title = fields.GetProperty("System.Title").GetString() ?? string.Empty,
-                    State = fields.GetProperty("System.State").GetString() ?? string.Empty
+                    State = fields.GetProperty("System.State").GetString() ?? string.Empty,
+                    ParentId = parentId,
+                    ParentTitle = parentTitle,
+                    AssignedTo = assignedTo
                 });
+            }
+        }
+        // Batch fetch parent titles
+        var parentTitles = new Dictionary<int, string>();
+        if (parentIdSet.Count > 0)
+        {
+            var batchUrl = $"https://dev.azure.com/{organization}/_apis/wit/workitemsbatch?api-version=7.0";
+            var batchRequest = new
+            {
+                ids = parentIdSet.ToArray(),
+                fields = new[] { "System.Title" }
+            };
+            var batchContent = new StringContent(System.Text.Json.JsonSerializer.Serialize(batchRequest), System.Text.Encoding.UTF8, "application/json");
+            var batchResponse = await client.PostAsync(batchUrl, batchContent);
+            if (batchResponse.IsSuccessStatusCode)
+            {
+                var batchJson = System.Text.Json.JsonDocument.Parse(await batchResponse.Content.ReadAsStringAsync());
+                if (batchJson.RootElement.TryGetProperty("value", out var valueArr))
+                {
+                    foreach (var parentItem in valueArr.EnumerateArray())
+                    {
+                        int pid = parentItem.GetProperty("id").GetInt32();
+                        var fields = parentItem.GetProperty("fields");
+                        var title = fields.GetProperty("System.Title").GetString() ?? string.Empty;
+                        parentTitles[pid] = title;
+                    }
+                }
+            }
+        }
+        // Assign parent titles and filter by PAT user
+        foreach (var t in tempTasks)
+        {
+            if (t.ParentId.HasValue && parentTitles.TryGetValue(t.ParentId.Value, out var ptitle))
+            {
+                t.ParentTitle = ptitle;
+            }
+            // Only add tasks assigned to PAT user
+            if (t.AssignedTo is not null && t.AssignedTo.Equals(AppSettings.Instance.AzureDevOps.PatUserDisplayName, StringComparison.InvariantCultureIgnoreCase))
+            {
+                result.Tasks.Add(t);
             }
         }
         return result;
