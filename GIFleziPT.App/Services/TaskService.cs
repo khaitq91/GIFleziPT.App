@@ -91,9 +91,16 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
                     TaskTitle = task.Title
                 };
                 var processResult = await ProcessTaskAsync(processRequest);
-                logger.LogInformation("ProcessTaskAsync result: {TaskName} - {Status} - {Output}", processResult.TaskName, processResult.Status, processResult.Output);
+                logger.LogInformation("\r\nProcessTaskAsync result: TaskName: {TaskName} - Status: {Status} - Output:\r\n{Output}\r\n===========\r\n", processResult.TaskName, processResult.Status, processResult.Output);
 
-                await UpdateAzureDevOpsTaskStateAsync(task.Id, "Closed");
+                if (processResult.Output.Contains("completed", StringComparison.InvariantCultureIgnoreCase))
+                {
+                    await UpdateAzureDevOpsTaskStateAsync(task.Id, "Closed");
+                }
+                else
+                {
+                    logger.LogInformation("Task {Id} - {Title} not marked as Closed because output does not indicate completion", task.Id, task.Title);
+                }
             }
             catch (Exception ex)
             {
