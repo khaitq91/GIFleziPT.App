@@ -8,4 +8,5 @@ public class AzureDevOpsTask
     public int? ParentId { get; set; }
     public string? ParentTitle { get; set; }
     public string? AssignedTo { get; set; }
+    public string? Description { get; set; }
 }

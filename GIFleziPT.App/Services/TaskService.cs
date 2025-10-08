@@ -1,7 +1,10 @@
 using System.Diagnostics;
+using System.Text.RegularExpressions;
+using System.Web;
 using GIFleziPT.App.Configs;
 using GIFleziPT.App.Constants;
 using GIFleziPT.App.Models;
+using Microsoft.AspNetCore.StaticFiles;
 
 namespace GIFleziPT.App.Services;
 
@@ -25,12 +28,14 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
         string output;
         try
         {
-            // Quote and escape the script path and task name to be safe for the shell
-            var taskArg = request.TaskTitle?.Replace("\"", "\\\"") ?? string.Empty;
+            // Sanitize description for command-line argument
+            var safeDescription = ExtractPrompt(request.TaskDescription);
+            var arguments = $"--dir \"D:\\Demo\\Demo-10\" --allow-all-tools \"{safeDescription}\"";
+            logger.LogInformation("Executing script: python3 \"{ScriptPath}\" {Arguments}", AppSettings.Instance.PythonScriptPath, arguments);
             var startInfo = new ProcessStartInfo
             {
                 FileName = "python3",
-                Arguments = $"\"{AppSettings.Instance.PythonScriptPath}\" \"{taskArg}\"",
+                Arguments = $"\"{AppSettings.Instance.PythonScriptPath}\" {arguments}",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
@@ -77,13 +82,11 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
     {
         var getTasksResult = await GetAzureDevOpsTasksAsync();
 
-        logger.LogInformation("RunAsync: Retrieved {TaskCount} tasks from Azure DevOps - User: {UserDisplayName}", getTasksResult.Tasks.Count, AppSettings.Instance.AzureDevOps.PatUserDisplayName);
+        logger.LogInformation("RunAsync: Retrieved {TaskCount} new tasks from Azure DevOps - User: {UserDisplayName}", getTasksResult.Tasks.Count, AppSettings.Instance.AzureDevOps.PatUserDisplayName);
         var tasks = getTasksResult.Tasks
-            .Where(m => m.State == "New" || m.State == "Active")
             .OrderBy(m => m.ParentId.ToString() ?? m.Title.Split('-', 2).FirstOrDefault())
             .ThenBy(m => m.Title.Split('-', 2).FirstOrDefault())
             .ToList();
-        logger.LogInformation("RunAsync: {NewTaskCount} new tasks to process", tasks.Count);
         foreach (var task in tasks)
         {
             logger.LogInformation("ProcessTaskAsync: {Id} - {Title} - {State} - ParentId: {ParentId} - ParentTitle: {ParentTitle}", task.Id, task.Title, task.State, task.ParentId, task.ParentTitle);
@@ -92,18 +95,19 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
                 var processRequest = new ProcessTaskRequest
                 {
                     TaskId = task.Id,
-                    TaskTitle = task.Title
+                    TaskTitle = task.Title,
+                    TaskDescription = task.Description ?? string.Empty
                 };
                 var processResult = await ProcessTaskAsync(processRequest);
                 logger.LogInformation("\r\nProcessTaskAsync result: TaskName: {TaskName} - Status: {Status} - Output:\r\n{Output}\r\n===========\r\n", processResult.TaskName, processResult.Status, processResult.Output);
 
                 if (processResult.Output.Contains("completed", StringComparison.InvariantCultureIgnoreCase))
                 {
-                    await UpdateAzureDevOpsTaskStateAsync(task.Id, "Closed");
+                   await UpdateAzureDevOpsTaskStateAsync(task.Id, "Closed");
                 }
                 else
                 {
-                    logger.LogInformation("Task {Id} - {Title} not marked as Closed because output does not indicate completion", task.Id, task.Title);
+                   logger.LogInformation("Task {Id} - {Title} not marked as Closed because output does not indicate completion", task.Id, task.Title);
                 }
             }
             catch (Exception ex)
@@ -123,7 +127,7 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
         var url = $"https://dev.azure.com/{organization}/{project}/_apis/wit/wiql?api-version=7.0";
         var wiql = new
         {
-            query = "SELECT [System.Id], [System.Title], [System.State], [System.Parent], [System.AssignedTo] FROM WorkItems WHERE [System.WorkItemType] = 'Task' ORDER BY [System.Id] DESC"
+            query = "SELECT [System.Id], [System.Title], [System.Description], [System.State], [System.Parent], [System.AssignedTo] FROM WorkItems WHERE [System.WorkItemType] = 'Task' AND ([System.State] = 'New' OR [System.State] = 'Active') ORDER BY [System.Id] DESC"
         };
 
         var result = new GetAzureDevOpsTasksResult();
@@ -173,11 +177,17 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
                         assignedTo = assignedProp.GetString();
                     }
                 }
+                string? description = null;
+                if (fields.TryGetProperty("System.Description", out var descProp) && descProp.ValueKind == System.Text.Json.JsonValueKind.String)
+                {
+                    description = descProp.GetString();
+                }
                 tempTasks.Add(new AzureDevOpsTask
                 {
                     Id = id,
                     Title = fields.GetProperty("System.Title").GetString() ?? string.Empty,
                     State = fields.GetProperty("System.State").GetString() ?? string.Empty,
+                    Description = description ?? string.Empty,
                     ParentId = parentId,
                     ParentTitle = parentTitle,
                     AssignedTo = assignedTo
@@ -259,6 +269,21 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
             Title = fields.GetProperty("System.Title").GetString() ?? string.Empty,
             State = fields.GetProperty("System.State").GetString() ?? string.Empty
         };
+    }
+
+    private static string ExtractPrompt(string? description)
+    {
+        if (string.IsNullOrEmpty(description)) return string.Empty;
+        description = HttpUtility.HtmlDecode(description);
+        var idx = description.IndexOf("Prompt:", StringComparison.InvariantCultureIgnoreCase);
+        if (idx == -1) return string.Empty;
+        description = description[(idx + "Prompt:".Length)..];
+        description = Regex.Replace(description, @"<.*?>", string.Empty)
+            .Replace("\"", "\\\"")
+            .Replace("\r", " ")
+            .Replace("\n", " ")
+            .Trim();
+        return description;
     }
     #endregion Azure DevOps Integration
 }
