@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using GIFleziPT.App.Configs;
 using GIFleziPT.App.Models;
 
 namespace GIFleziPT.App.Services;
@@ -7,9 +8,17 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
 {
     public async Task<ProcessTaskResult> ProcessTaskAsync(ProcessTaskRequest request)
     {
+        if (request == null)
+        {
+            throw new ArgumentNullException(nameof(request));
+        }
+
         logger.LogInformation("Processing task: {TaskName}", request.TaskName);
 
-        var scriptPath = @"/Users/khaitq/Documents/khaitq/workspaces/GIFleziPT.App/hello.py";
+        if (!File.Exists(AppSettings.Instance.PythonScriptPath))
+        {
+            throw new Exception($"File {AppSettings.Instance.PythonScriptPath} not found");
+        }
 
         // Execute the Python script and capture its output
         string output;
@@ -20,7 +29,7 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
             var startInfo = new ProcessStartInfo
             {
                 FileName = "python3",
-                Arguments = $"\"{scriptPath}\" \"{taskArg}\"",
+                Arguments = $"\"{AppSettings.Instance.PythonScriptPath}\" \"{taskArg}\"",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
@@ -30,13 +39,9 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
             using var process = new Process { StartInfo = startInfo };
             process.Start();
 
-            var stdOutTask = process.StandardOutput.ReadToEndAsync();
-            var stdErrTask = process.StandardError.ReadToEndAsync();
-
-            await Task.WhenAll(stdOutTask, stdErrTask, process.WaitForExitAsync());
-
-            var stdOut = await stdOutTask;
-            var stdErr = await stdErrTask;
+            await process.WaitForExitAsync();
+            var stdOut = await process.StandardOutput.ReadToEndAsync();
+            var stdErr = await process.StandardError.ReadToEndAsync();
 
             if (!string.IsNullOrWhiteSpace(stdErr) && string.IsNullOrWhiteSpace(stdOut))
             {
@@ -53,7 +58,7 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Failed to execute python script at {ScriptPath}", scriptPath);
+            logger.LogError(ex, "Failed to execute python script at {ScriptPath}", AppSettings.Instance.PythonScriptPath);
             output = $"Failed to execute script: {ex.Message}";
         }
 
@@ -61,7 +66,7 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
 
         return new ProcessTaskResult
         {
-            TaskName = request.TaskName,
+            TaskName = request.TaskName!,
             Output = output,
             Status = "Processed"
         };

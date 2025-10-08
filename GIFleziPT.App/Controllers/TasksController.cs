@@ -5,7 +5,7 @@ using Microsoft.AspNetCore.Mvc;
 namespace GIFleziPT.App.Controllers;
 
 [ApiController]
-[Route("[controller]")]
+[Route("tasks")]
 public class TasksController(
     ILogger<TasksController> logger,
     ITaskService taskService) : ControllerBase
