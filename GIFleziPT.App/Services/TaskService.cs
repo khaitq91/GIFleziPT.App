@@ -1,11 +1,55 @@
 using System.Diagnostics;
 using GIFleziPT.App.Configs;
+using GIFleziPT.App.Constants;
 using GIFleziPT.App.Models;
 
 namespace GIFleziPT.App.Services;
 
 public class TaskService(ILogger<TaskService> logger) : ITaskService
 {
+    public async Task<GetAzureDevOpsTasksResult> GetAzureDevOpsTasksAsync()
+    {
+        string organization = AppSettings.Instance.AzureDevOps.Organization;
+        string project = AppSettings.Instance.AzureDevOps.Project;
+        string pat = AppSettings.Instance.AzureDevOps.PersonalAccessToken;
+
+        var url = $"https://dev.azure.com/{organization}/{project}/_apis/wit/wiql?api-version=7.0";
+        var wiql = new
+        {
+            query = "SELECT [System.Id], [System.Title], [System.State] FROM WorkItems WHERE [System.WorkItemType] = 'Task' ORDER BY [System.Id] DESC"
+        };
+
+        var result = new GetAzureDevOpsTasksResult();
+        using var client = new HttpClient();
+        var authToken = Convert.ToBase64String(System.Text.Encoding.ASCII.GetBytes($":{pat}"));
+        client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue(AuthSchemes.Basic, authToken);
+
+        var wiqlContent = new StringContent(System.Text.Json.JsonSerializer.Serialize(wiql), System.Text.Encoding.UTF8, ContentTypes.ApplicationJson);
+        var wiqlResponse = await client.PostAsync(url, wiqlContent);
+        wiqlResponse.EnsureSuccessStatusCode();
+        var wiqlResult = System.Text.Json.JsonDocument.Parse(await wiqlResponse.Content.ReadAsStringAsync());
+        var workItemRefs = wiqlResult.RootElement.GetProperty("workItems");
+
+        foreach (var itemRef in workItemRefs.EnumerateArray())
+        {
+            int id = itemRef.GetProperty("id").GetInt32();
+            var workItemUrl = $"https://dev.azure.com/{organization}/_apis/wit/workitems/{id}?api-version=7.0";
+            var workItemResponse = await client.GetAsync(workItemUrl);
+            if (workItemResponse.IsSuccessStatusCode)
+            {
+                var workItemJson = System.Text.Json.JsonDocument.Parse(await workItemResponse.Content.ReadAsStringAsync());
+                var fields = workItemJson.RootElement.GetProperty("fields");
+                result.Tasks.Add(new AzureDevOpsTask
+                {
+                    Id = id,
+                    Title = fields.GetProperty("System.Title").GetString() ?? string.Empty,
+                    State = fields.GetProperty("System.State").GetString() ?? string.Empty
+                });
+            }
+        }
+        return result;
+    }
+
     public async Task<ProcessTaskResult> ProcessTaskAsync(ProcessTaskRequest request)
     {
         if (request == null)

@@ -1,3 +1,4 @@
+using GIFleziPT.App.Configs;
 using GIFleziPT.App.Models;
 using GIFleziPT.App.Services;
 using Microsoft.AspNetCore.Mvc;
@@ -22,7 +23,24 @@ public class TasksController(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Error processing task: {TaskName}", request.TaskName);
+            logger.LogError(ex, "ProcessTaskAsync error. TaskName: {TaskName}. Message: {Message}", request.TaskName, ex.Message);
+            return StatusCode(500, "Internal server error");
+        }
+    }
+
+    [HttpGet("get-tasks")]
+    public async Task<IActionResult> GetAzureDevOpsTasks()
+    {
+        logger.LogInformation("Received request to get Azure DevOps tasks.");
+
+        try
+        {
+            var result = await taskService.GetAzureDevOpsTasksAsync();
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "GetTasksFromAzureDevOps error. Message: {Message}", ex.Message);
             return StatusCode(500, "Internal server error");
         }
     }

@@ -6,4 +6,5 @@ public class AppSettings
     public static IConfiguration Configs { get; set; } = null!;
 
     public string PythonScriptPath { get; set; } = string.Empty;
+    public AzureDevOpsSettings AzureDevOps { get; set; } = new AzureDevOpsSettings();
 }
