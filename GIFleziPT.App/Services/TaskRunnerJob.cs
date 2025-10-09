@@ -7,7 +7,7 @@ public class TaskRunnerJob : BackgroundService
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<TaskRunnerJob> _logger;
     private readonly TimeSpan _interval;
-    private readonly TimeSpan _startupDelay = TimeSpan.FromSeconds(2);
+    private readonly TimeSpan _startupDelay = TimeSpan.FromSeconds(5);
     private volatile bool _isRunning = false;
 
     public TaskRunnerJob(IServiceProvider serviceProvider, ILogger<TaskRunnerJob> logger)

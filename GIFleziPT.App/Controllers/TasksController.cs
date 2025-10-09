@@ -35,7 +35,8 @@ public class TasksController(
 
         try
         {
-            var result = await taskService.GetAzureDevOpsTasksAsync();
+            var userProfile = await taskService.GetAzureDevOpsProfileAsync();
+            var result = await taskService.GetAzureDevOpsTasksAsync(userProfile);
             return Ok(result);
         }
         catch (Exception ex)
@@ -61,4 +62,23 @@ public class TasksController(
             return StatusCode(500, "Internal server error");
         }
     }
+
+    [HttpPost("test-update/{taskId}")]
+    public async Task<IActionResult> TestUpdateTaskAsync(int taskId, [FromBody] TestUpdateRequest request)
+    {
+        logger.LogInformation("Received request TestUpdateTaskAsync for task {TaskId}", taskId);
+
+        try
+        {
+            var result = await taskService.UpdateAzureDevOpsTaskStateAsync(taskId, request.State, request.Comment);
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "TestUpdateTaskAsync error. TaskId: {TaskId}. Message: {Message}", taskId, ex.Message);
+            return StatusCode(500, "Internal server error");
+        }
+    }
 }
+
+public record TestUpdateRequest(string State, string? Comment);

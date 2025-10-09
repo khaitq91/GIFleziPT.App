@@ -4,18 +4,15 @@ using System.Web;
 using GIFleziPT.App.Configs;
 using GIFleziPT.App.Constants;
 using GIFleziPT.App.Models;
-using Microsoft.AspNetCore.StaticFiles;
+using Newtonsoft.Json;
 
 namespace GIFleziPT.App.Services;
 
-public class TaskService(ILogger<TaskService> logger) : ITaskService
+public class TaskService(ILogger<TaskService> logger, IHttpClientFactory httpClientFactory) : ITaskService
 {
     public async Task<ProcessTaskResult> ProcessTaskAsync(ProcessTaskRequest request)
     {
-        if (request == null)
-        {
-            throw new ArgumentNullException(nameof(request));
-        }
+        ArgumentNullException.ThrowIfNull(request);
 
         logger.LogInformation("Processing task: {TaskName}", request.TaskTitle);
 
@@ -80,9 +77,11 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
 
     public async Task RunAsync()
     {
-        var getTasksResult = await GetAzureDevOpsTasksAsync();
+        // Get current user's profile first
+        var currentUserProfile = await GetAzureDevOpsProfileAsync();
+        var getTasksResult = await GetAzureDevOpsTasksAsync(currentUserProfile);
 
-        logger.LogInformation("RunAsync: Retrieved {TaskCount} new tasks from Azure DevOps - User: {UserDisplayName}", getTasksResult.Tasks.Count, AppSettings.Instance.AzureDevOps.PatUserDisplayName);
+        logger.LogInformation("RunAsync: Retrieved {TaskCount} new tasks from Azure DevOps - User: {UserDisplayName} ({UserEmailAddress})", getTasksResult.Tasks.Count, currentUserProfile.DisplayName, currentUserProfile.EmailAddress);
         var tasks = getTasksResult.Tasks
             .OrderBy(m => m.ParentId.ToString() ?? m.Title.Split('-', 2).FirstOrDefault())
             .ThenBy(m => m.Title.Split('-', 2).FirstOrDefault())
@@ -103,7 +102,8 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
 
                 if (processResult.Output.Contains("completed", StringComparison.InvariantCultureIgnoreCase))
                 {
-                   await UpdateAzureDevOpsTaskStateAsync(task.Id, "Closed");
+                   var comment = $"<p><h5><i>Task automatically completed on {DateTime.Now:yyyy-MM-dd HH:mm:ss}. Output:</i></h5></p><br/><p>{processResult.Output}</p>";
+                   await UpdateAzureDevOpsTaskStateAsync(task.Id, "Closed", comment);
                 }
                 else
                 {
@@ -118,24 +118,58 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
     }
 
     #region Azure DevOps Integration
-    public async Task<GetAzureDevOpsTasksResult> GetAzureDevOpsTasksAsync()
+    
+    private const string AzureDevOpsApiVersion = "7.0";
+    private const string WorkItemsApiPath = "_apis/wit";
+    private const string ProfileApiPath = "_apis/profile/profiles/me";
+    
+    private HttpClient CreateAzureDevOpsClient()
+    {
+        var client = httpClientFactory.CreateClient();
+        var pat = AppSettings.Instance.AzureDevOps.PersonalAccessToken;
+        var authToken = Convert.ToBase64String(System.Text.Encoding.ASCII.GetBytes($":{pat}"));
+        client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue(AuthSchemes.Basic, authToken);
+        return client;
+    }
+    
+    public async Task<AzureDevOpsProfile> GetAzureDevOpsProfileAsync()
+    {
+        string organization = AppSettings.Instance.AzureDevOps.Organization;
+
+        using var client = CreateAzureDevOpsClient();
+        
+        var profileUrl = $"https://vssps.dev.azure.com/{organization}/{ProfileApiPath}";
+        var profileResponse = await client.GetAsync(profileUrl);
+        profileResponse.EnsureSuccessStatusCode();
+        var profileJsonString = await profileResponse.Content.ReadAsStringAsync();
+        
+        var profile = JsonConvert.DeserializeObject<AzureDevOpsProfile>(profileJsonString) ?? new AzureDevOpsProfile();
+        
+        logger.LogInformation("Retrieved current user profile: {DisplayName} ({EmailAddress})", profile.DisplayName, profile.EmailAddress);
+        
+        return profile;
+    }
+
+    public async Task<GetAzureDevOpsTasksResult> GetAzureDevOpsTasksAsync(AzureDevOpsProfile userProfile)
     {
         string organization = AppSettings.Instance.AzureDevOps.Organization;
         string project = AppSettings.Instance.AzureDevOps.Project;
-        string pat = AppSettings.Instance.AzureDevOps.PersonalAccessToken;
 
-        var url = $"https://dev.azure.com/{organization}/{project}/_apis/wit/wiql?api-version=7.0";
+        var url = $"https://dev.azure.com/{organization}/{project}/{WorkItemsApiPath}/wiql?api-version={AzureDevOpsApiVersion}";
+        
         var wiql = new
         {
-            query = "SELECT [System.Id], [System.Title], [System.Description], [System.State], [System.Parent], [System.AssignedTo] FROM WorkItems WHERE [System.WorkItemType] = 'Task' AND ([System.State] = 'New' OR [System.State] = 'Active') ORDER BY [System.Id] DESC"
+            query = $"SELECT [System.Id], [System.Title], [System.Description], [System.State], [System.Parent], [System.AssignedTo] FROM WorkItems WHERE [System.WorkItemType] = 'Task' AND ([System.State] = 'New' OR [System.State] = 'Active') AND [System.AssignedTo] = @Me ORDER BY [System.Id] DESC"
         };
+        
+        logger.LogInformation("User profile - ID: {Id}, Email: {Email}, DisplayName: {DisplayName}", 
+            userProfile.Id, userProfile.EmailAddress, userProfile.DisplayName);
+        logger.LogInformation("Azure DevOps query: {Query}", wiql.query);
 
         var result = new GetAzureDevOpsTasksResult();
-        using var client = new HttpClient();
-        var authToken = Convert.ToBase64String(System.Text.Encoding.ASCII.GetBytes($":{pat}"));
-        client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue(AuthSchemes.Basic, authToken);
+        using var client = CreateAzureDevOpsClient();
 
-        var wiqlContent = new StringContent(System.Text.Json.JsonSerializer.Serialize(wiql), System.Text.Encoding.UTF8, "application/json");
+        var wiqlContent = new StringContent(JsonConvert.SerializeObject(wiql), System.Text.Encoding.UTF8, "application/json");
         var wiqlResponse = await client.PostAsync(url, wiqlContent);
         wiqlResponse.EnsureSuccessStatusCode();
         var wiqlResult = System.Text.Json.JsonDocument.Parse(await wiqlResponse.Content.ReadAsStringAsync());
@@ -146,7 +180,7 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
         foreach (var itemRef in workItemRefs.EnumerateArray())
         {
             int id = itemRef.GetProperty("id").GetInt32();
-            var workItemUrl = $"https://dev.azure.com/{organization}/_apis/wit/workitems/{id}?api-version=7.0";
+            var workItemUrl = $"https://dev.azure.com/{organization}/{WorkItemsApiPath}/workitems/{id}?api-version={AzureDevOpsApiVersion}";
             var workItemResponse = await client.GetAsync(workItemUrl);
             if (workItemResponse.IsSuccessStatusCode)
             {
@@ -155,6 +189,8 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
                 int? parentId = null;
                 string? parentTitle = null;
                 string? assignedTo = null;
+                string? assignedToId = null;
+                string? assignedToEmail = null;
                 if (fields.TryGetProperty("System.Parent", out var parentProp))
                 {
                     if (parentProp.ValueKind == System.Text.Json.JsonValueKind.Number)
@@ -170,6 +206,14 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
                         if (assignedProp.TryGetProperty("displayName", out var displayNameProp))
                         {
                             assignedTo = displayNameProp.GetString();
+                        }
+                        if (assignedProp.TryGetProperty("id", out var idProp))
+                        {
+                            assignedToId = idProp.GetString();
+                        }
+                        if (assignedProp.TryGetProperty("uniqueName", out var uniqueNameProp))
+                        {
+                            assignedToEmail = uniqueNameProp.GetString();
                         }
                     }
                     else if (assignedProp.ValueKind == System.Text.Json.JsonValueKind.String)
@@ -190,21 +234,24 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
                     Description = description ?? string.Empty,
                     ParentId = parentId,
                     ParentTitle = parentTitle,
-                    AssignedTo = assignedTo
+                    AssignedTo = assignedTo,
+                    AssignedToId = assignedToId,
+                    AssignedToEmail = assignedToEmail
                 });
             }
         }
+        
         // Batch fetch parent titles
         var parentTitles = new Dictionary<int, string>();
         if (parentIdSet.Count > 0)
         {
-            var batchUrl = $"https://dev.azure.com/{organization}/_apis/wit/workitemsbatch?api-version=7.0";
+            var batchUrl = $"https://dev.azure.com/{organization}/{WorkItemsApiPath}/workitemsbatch?api-version={AzureDevOpsApiVersion}";
             var batchRequest = new
             {
                 ids = parentIdSet.ToArray(),
                 fields = new[] { "System.Title" }
             };
-            var batchContent = new StringContent(System.Text.Json.JsonSerializer.Serialize(batchRequest), System.Text.Encoding.UTF8, "application/json");
+            var batchContent = new StringContent(JsonConvert.SerializeObject(batchRequest), System.Text.Encoding.UTF8, "application/json");
             var batchResponse = await client.PostAsync(batchUrl, batchContent);
             if (batchResponse.IsSuccessStatusCode)
             {
@@ -221,30 +268,32 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
                 }
             }
         }
-        // Assign parent titles and filter by PAT user
+
+        logger.LogInformation("Fetched {TaskCount} tasks assigned to current user, {ParentCount} unique parents", tempTasks.Count, parentTitles.Count);
+        
+        // Assign parent titles and add all tasks (already filtered by WIQL query)
         foreach (var t in tempTasks)
         {
             if (t.ParentId.HasValue && parentTitles.TryGetValue(t.ParentId.Value, out var ptitle))
             {
                 t.ParentTitle = ptitle;
             }
-            // Only add tasks assigned to PAT user
-            if (t.AssignedTo is not null && t.AssignedTo.Equals(AppSettings.Instance.AzureDevOps.PatUserDisplayName, StringComparison.InvariantCultureIgnoreCase))
-            {
-                result.Tasks.Add(t);
-            }
+            
+            // Tasks are already filtered by WIQL, add them all
+            logger.LogDebug("Adding task {TaskId}: AssignedTo='{AssignedTo}', AssignedToEmail='{AssignedToEmail}', AssignedToId='{AssignedToId}'", 
+                t.Id, t.AssignedTo, t.AssignedToEmail, t.AssignedToId);
+            result.Tasks.Add(t);
         }
         return result;
     }
 
-    public async Task<AzureDevOpsTask> UpdateAzureDevOpsTaskStateAsync(int taskId, string newState)
+    public async Task<AzureDevOpsTask> UpdateAzureDevOpsTaskStateAsync(int taskId, string newState, string? comment = null)
     {
         logger.LogInformation("Updating task {TaskId} to state {NewState}", taskId, newState);
         string organization = AppSettings.Instance.AzureDevOps.Organization;
-        string project = AppSettings.Instance.AzureDevOps.Project;
-        string pat = AppSettings.Instance.AzureDevOps.PersonalAccessToken;
-        var url = $"https://dev.azure.com/{organization}/_apis/wit/workitems/{taskId}?api-version=7.0";
-        var patchDoc = new[]
+        var url = $"https://dev.azure.com/{organization}/{WorkItemsApiPath}/workitems/{taskId}?api-version={AzureDevOpsApiVersion}";
+        
+        var patchOperations = new List<object>
         {
             new
             {
@@ -253,10 +302,20 @@ public class TaskService(ILogger<TaskService> logger) : ITaskService
                 value = newState
             }
         };
-        using var client = new HttpClient();
-        var authToken = Convert.ToBase64String(System.Text.Encoding.ASCII.GetBytes($":{pat}"));
-        client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue(AuthSchemes.Basic, authToken);
-        var patchContent = new StringContent(System.Text.Json.JsonSerializer.Serialize(patchDoc), System.Text.Encoding.UTF8, "application/json-patch+json");
+        
+        if (!string.IsNullOrEmpty(comment))
+        {
+            patchOperations.Add(new
+            {
+                op = "add",
+                path = "/fields/System.History",
+                value = comment
+            });
+        }
+        
+        var patchDoc = patchOperations.ToArray();
+        using var client = CreateAzureDevOpsClient();
+        var patchContent = new StringContent(JsonConvert.SerializeObject(patchDoc), System.Text.Encoding.UTF8, "application/json-patch+json");
         var response = await client.PatchAsync(url, patchContent);
         response.EnsureSuccessStatusCode();
         var workItemJson = System.Text.Json.JsonDocument.Parse(await response.Content.ReadAsStringAsync());

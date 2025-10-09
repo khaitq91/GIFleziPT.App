@@ -17,7 +17,7 @@ def main():
         sys.exit(1)
 
     task_title = sys.argv[1]
-    print(f"Task {task_title} completed")
+    print(f"Task completed")
 
 
 if __name__ == "__main__":

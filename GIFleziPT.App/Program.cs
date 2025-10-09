@@ -21,6 +21,7 @@ builder.Services.AddLogging(loggingBuilder =>
 });
 
 builder.Services.AddControllers();
+builder.Services.AddHttpClient();
 builder.Services.AddScoped<ITaskService, TaskService>();
 builder.Services.AddHostedService<TaskRunnerJob>();
 
